@@ -1,0 +1,164 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-board-bg text-slate-100 antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  * { box-sizing: border-box; }
+}
+
+@layer components {
+  /* ── Cards ── */
+  .card {
+    @apply bg-board-card border border-board-border rounded-2xl;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.04);
+  }
+
+  /* ── Buttons ── */
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-medium
+           transition-all duration-150 cursor-pointer select-none
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-indigo-600 text-white shadow-sm;
+  }
+  .btn-primary:hover { @apply bg-indigo-500; }
+  .btn-primary:active { @apply bg-indigo-700; }
+
+  .btn-secondary {
+    @apply btn border border-board-border text-slate-300;
+    background-color: theme('colors.board.card');
+  }
+  .btn-secondary:hover {
+    background-color: theme('colors.board.cardHov');
+    border-color: theme('colors.board.borderHov');
+    @apply text-white;
+  }
+
+  .btn-ghost {
+    @apply btn text-slate-400;
+  }
+  .btn-ghost:hover {
+    background-color: rgba(255,255,255,0.08);
+    @apply text-slate-100;
+  }
+
+  .btn-danger {
+    @apply btn border border-red-900/40 text-red-400;
+    background-color: rgba(127,29,29,0.3);
+  }
+  .btn-danger:hover {
+    background-color: rgba(127,29,29,0.5);
+    border-color: rgba(185,28,28,0.4);
+    @apply text-red-300;
+  }
+
+  .btn-success {
+    @apply btn border border-emerald-900/40 text-emerald-400;
+    background-color: rgba(6,78,59,0.3);
+  }
+  .btn-success:hover {
+    background-color: rgba(6,78,59,0.5);
+    @apply text-emerald-300;
+  }
+
+  .btn-icon {
+    @apply inline-flex items-center justify-center w-7 h-7 rounded-lg
+           transition-all duration-150 cursor-pointer text-slate-500;
+  }
+  .btn-icon:hover {
+    background-color: rgba(255,255,255,0.08);
+    @apply text-slate-200;
+  }
+
+  /* ── Inputs ── */
+  .input {
+    @apply w-full border border-board-border rounded-xl
+           px-3 py-2 text-sm text-white placeholder-slate-600
+           focus:outline-none transition-all duration-150;
+    background-color: theme('colors.board.surface');
+  }
+  .input:focus {
+    border-color: rgba(99,102,241,0.6);
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.15);
+  }
+
+  .input-sm {
+    @apply input py-1.5 text-xs rounded-lg;
+  }
+
+  /* ── Badges ── */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold;
+  }
+  .badge-outline {
+    @apply badge border;
+  }
+
+  /* ── Nav tabs ── */
+  .nav-tab {
+    @apply flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-xl
+           transition-all duration-150 cursor-pointer select-none;
+  }
+  .nav-tab-active {
+    @apply nav-tab bg-indigo-600/90 text-white shadow-sm;
+  }
+  .nav-tab-inactive {
+    @apply nav-tab text-slate-400;
+  }
+  .nav-tab-inactive:hover {
+    background-color: rgba(255,255,255,0.06);
+    @apply text-slate-200;
+  }
+
+  /* ── Misc ── */
+  .status-dot  { @apply w-2 h-2 rounded-full shrink-0; }
+  .section-label { @apply text-xs font-semibold text-slate-500 uppercase tracking-widest; }
+  .divider     { @apply border-t border-board-border/60; }
+}
+
+@layer utilities {
+  .glass {
+    background: rgba(17,18,25,0.82);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a2d47; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #363a5e; }
+
+/* ── Drag ghost ── */
+.dragging-card {
+  opacity: 0.95 !important;
+  box-shadow: 0 24px 48px rgba(0,0,0,0.7), 0 0 0 2px rgba(99,102,241,0.7) !important;
+  transform: rotate(1.5deg) scale(1.02) !important;
+}
+
+/* ── Drop zone ── */
+.drop-zone-active {
+  box-shadow: inset 0 0 0 2px rgba(99,102,241,0.45), 0 0 20px rgba(99,102,241,0.08);
+}
+
+/* ── Priority left-border strips ── */
+.priority-urgent { box-shadow: inset 3px 0 0 #ef4444; }
+.priority-high   { box-shadow: inset 3px 0 0 #f97316; }
+.priority-medium { box-shadow: inset 3px 0 0 #6366f1; }
+.priority-low    { box-shadow: inset 3px 0 0 #475569; }
+
+/* ── Shimmer skeleton ── */
+.skeleton {
+  background: linear-gradient(90deg, #191c2a 25%, #1f2235 50%, #191c2a 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.8s linear infinite;
+}

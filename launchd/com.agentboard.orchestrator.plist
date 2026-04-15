@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentboard.orchestrator</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/progmatech/Public/workspace/agent-board/backend/server.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/progmatech/Public/workspace/agent-board/backend</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>BACKEND_PORT</key>
+    <string>3001</string>
+    <key>DB_PATH</key>
+    <string>/Users/progmatech/.orchestrator/db.sqlite</string>
+    <key>HEARTBEAT_INTERVAL_MS</key>
+    <string>30000</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/progmatech/.orchestrator/orchestrator.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/progmatech/.orchestrator/orchestrator-error.log</string>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>

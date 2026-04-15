@@ -1,0 +1,18 @@
+{
+  "agents": [
+    {
+      "id": "openclaw-1",
+      "name": "OpenClaw",
+      "type": "openclaw",
+      "host": "localhost",
+      "port": 4001,
+      "cli_command": null,
+      "max_idle_seconds": 180,
+      "description": "Primary OpenClaw coding agent on Mac Mini"
+    }
+  ],
+  "defaults": {
+    "max_idle_seconds": 180,
+    "heartbeat_interval_seconds": 60
+  }
+}
