@@ -4,10 +4,9 @@
  * Receives outbound webhooks from the Perfex CRM MCP Integration module.
  *
  * Supported events:
- *   task_assigned  — CRM task was assigned to the AI agent staff member.
- *                    Creates a board task and assigns it to an available agent.
- *   comment_added  — A new comment was added to a CRM task that has the AI agent.
- *                    Finds the running board task and notifies its agent.
+ *   task_assigned  — CRM task assigned to AI agent. Creates board task,
+ *                    assigns idle agent, spawns openclaw, sends Telegram "started".
+ *   comment_added  — New comment on agent task. Re-triggers agent with comment context.
  */
 
 const express      = require('express')
@@ -16,155 +15,209 @@ const { spawn }    = require('child_process')
 const http         = require('http')
 const { agentQueries, taskQueries, logQueries } = require('../db')
 const orchestrator = require('../orchestrator')
+const telegram     = require('../telegram')
 
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || '/opt/homebrew/bin/openclaw'
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Find the board task created for a given CRM task ID.
- * We store crm_task_id in the task's context JSON at creation time.
- */
 function findBoardTaskByCrmId(crmTaskId) {
-  const all = taskQueries.getAll.all()
-  return all.find((t) => {
+  return taskQueries.getAll.all().find((t) => {
     try {
       const ctx = typeof t.context === 'string' ? JSON.parse(t.context) : (t.context || {})
       return String(ctx.crm_task_id) === String(crmTaskId)
-    } catch {
-      return false
-    }
+    } catch { return false }
   }) || null
 }
 
-/**
- * Send a heartbeat to the orchestrator from a spawned process.
- */
-function sendHeartbeat(orchestratorPort, agentId, taskId, progress, status, message) {
+function sendHeartbeat(port, agentId, taskId, progress, status, message) {
   const body = JSON.stringify({ agentId, taskId, progress, status, message })
-  const req = http.request({
-    hostname: 'localhost',
-    port: orchestratorPort,
-    path: '/api/heartbeat',
-    method: 'POST',
+  const req  = http.request({
+    hostname: 'localhost', port, path: '/api/heartbeat', method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-  }, (res) => res.resume())
+  }, (r) => r.resume())
   req.on('error', () => {})
   req.write(body)
   req.end()
 }
 
 /**
- * Spawn openclaw and wire heartbeats back to the orchestrator.
+ * Spawn openclaw, wire heartbeats, send Telegram on start + completion.
  */
-function spawnAgent(agent, boardTaskId, message, orchestratorPort, label) {
+function spawnAgent(agent, boardTask, message, port) {
   const agentSlug = (agent.name || '').toLowerCase()
+  const taskTitle = boardTask.title || `Board Task ${boardTask.id}`
+
+  // Telegram: started
+  telegram.sendMessage(
+    `🚀 <b>${agent.name}</b> بدأ العمل على:\n<b>${taskTitle}</b>`,
+    { account: agentSlug }
+  ).catch(() => {})
+
   const proc = spawn(OPENCLAW_BIN, ['agent', '--agent', agentSlug, '--message', message, '--json'], {
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 
-  let heartbeatInterval = null
-  sendHeartbeat(orchestratorPort, agent.id, boardTaskId, 5, 'running', `${agent.name}: ${label}`)
-  heartbeatInterval = setInterval(() => {
-    sendHeartbeat(orchestratorPort, agent.id, boardTaskId, null, 'running', `${agent.name} يعمل…`)
+  let output = ''
+  sendHeartbeat(port, agent.id, boardTask.id, 5, 'running', `${agent.name}: بدأ العمل`)
+  const hbInterval = setInterval(() => {
+    sendHeartbeat(port, agent.id, boardTask.id, null, 'running', `${agent.name} يعمل…`)
   }, 25000)
 
+  proc.stdout.on('data', (chunk) => { output += chunk.toString() })
   proc.stderr.on('data', (chunk) => {
     const t = chunk.toString().trim()
-    if (t) console.log(`[crm-webhook][${agent.name}] stderr: ${t}`)
+    if (t) console.log(`[crm-webhook][${agent.name}] ${t}`)
   })
 
   proc.on('close', (code) => {
-    clearInterval(heartbeatInterval)
-    sendHeartbeat(orchestratorPort, agent.id, boardTaskId,
-      code === 0 ? 100 : 0,
-      code === 0 ? 'completed' : 'failed',
-      code === 0 ? `${label} — اكتمل` : `خرج بكود ${code}`)
+    clearInterval(hbInterval)
+    if (code === 0) {
+      // Extract final response text
+      let summary = 'تم إنهاء المهمة بنجاح'
+      try {
+        const lines  = output.trim().split('\n').filter(Boolean)
+        const parsed = JSON.parse(lines[lines.length - 1])
+        if (parsed.text || parsed.response || parsed.content) {
+          summary = (parsed.text || parsed.response || parsed.content).slice(0, 300)
+        }
+      } catch { /* plain text output */ }
+
+      sendHeartbeat(port, agent.id, boardTask.id, 100, 'completed', summary)
+
+      // Telegram: completed
+      telegram.sendMessage(
+        `✅ <b>${agent.name}</b> أنهى المهمة:\n<b>${taskTitle}</b>\n\n${summary}`,
+        { account: agentSlug }
+      ).catch(() => {})
+
+    } else {
+      sendHeartbeat(port, agent.id, boardTask.id, 0, 'failed', `خرج بكود ${code}`)
+
+      // Telegram: failed
+      telegram.sendMessage(
+        `❌ <b>${agent.name}</b> فشل في المهمة:\n<b>${taskTitle}</b>\nكود الخطأ: ${code}`,
+        { account: agentSlug }
+      ).catch(() => {})
+    }
   })
+
   proc.on('error', (err) => {
-    clearInterval(heartbeatInterval)
-    sendHeartbeat(orchestratorPort, agent.id, boardTaskId, 0, 'failed', `خطأ في التشغيل: ${err.message}`)
+    clearInterval(hbInterval)
+    sendHeartbeat(port, agent.id, boardTask.id, 0, 'failed', err.message)
+    telegram.sendMessage(
+      `❌ <b>${agent.name}</b> فشل في تشغيل المهمة:\n<b>${taskTitle}</b>\n${err.message}`,
+      { account: agentSlug }
+    ).catch(() => {})
   })
 }
 
 /**
- * Build the initial prompt for a new CRM task assignment.
+ * Build the full prompt for a new CRM task assignment.
+ * The agent must: read task → set In Progress → work → log_time (client language)
+ * → set Complete → notify board → done.
  */
-function buildAssignedPrompt(crmTask, boardTaskId, orchestratorPort) {
+function buildAssignedPrompt(crmTask, boardTask, port) {
   const statusMap = { 1: 'Not Started', 2: 'In Progress', 3: 'Testing', 4: 'Awaiting Feedback', 5: 'Complete' }
+  const relInfo   = crmTask.rel_type === 'project' && crmTask.rel_id
+    ? `مشروع ID: ${crmTask.rel_id}`
+    : 'غير مرتبط بمشروع'
+
   return [
-    `# مهمة جديدة من نظام CRM`,
+    `# مهمة جديدة من CRM — ابدأ الآن`,
     ``,
-    `تم تعيينك على المهمة التالية. استخدم أدوات MCP للعمل عليها.`,
+    `تم تعيينك على مهمة في نظام CRM. اقرأ كل التفاصيل وابدأ فوراً بدون انتظار.`,
     ``,
     `## تفاصيل المهمة`,
-    `- **الاسم:** ${crmTask.name || crmTask.title || `Task #${crmTask.id}`}`,
-    `- **الوصف:** ${crmTask.description || 'لا يوجد وصف'}`,
+    `- **العنوان:** ${crmTask.name || crmTask.title || `Task #${crmTask.id}`}`,
+    `- **الوصف:** ${crmTask.description || 'لا يوجد وصف — استنتج من العنوان'}`,
     `- **الحالة الحالية:** ${statusMap[crmTask.status] || crmTask.status}`,
+    `- **الأولوية:** ${crmTask.priority == 1 ? 'منخفضة' : crmTask.priority == 3 ? 'عالية' : 'متوسطة'}`,
+    `- **المشروع:** ${relInfo}`,
     `- **CRM Task ID:** ${crmTask.id}`,
     ``,
-    `## خطوات العمل`,
+    `## الخطوات المطلوبة بالترتيب`,
     ``,
-    `1. **غيّر الحالة إلى In Progress:**`,
-    `   استخدم أداة \`update_task_status\` → task_id="${crmTask.id}", status=2`,
+    `### الخطوة 1 — سجّل البداية (فوراً)`,
+    `\`\`\``,
+    `update_task_status → task_id="${crmTask.id}", status=2`,
+    `\`\`\``,
     ``,
-    `2. **اقرأ التفاصيل الكاملة:**`,
-    `   استخدم أداة \`get_task\` → task_id="${crmTask.id}"`,
+    `### الخطوة 2 — اقرأ التفاصيل الكاملة`,
+    `\`\`\``,
+    `get_task → task_id="${crmTask.id}"`,
+    `get_comments → task_id="${crmTask.id}"`,
+    `\`\`\``,
+    `إذا وُجدت تعليقات من العميل — اقرأها وخذها بعين الاعتبار.`,
     ``,
-    `3. **اقرأ التعليقات الموجودة (إن وُجدت):**`,
-    `   استخدم أداة \`get_comments\` → task_id="${crmTask.id}"`,
+    `### الخطوة 3 — اعمل على المهمة`,
+    `افهم العنوان والوصف جيداً. نفّذ ما هو مطلوب بالكامل.`,
     ``,
-    `4. **اعمل على المهمة** حسب وصفها.`,
+    `### الخطوة 4 — سجّل الوقت بعد كل خطوة رئيسية`,
+    `\`\`\``,
+    `log_time → task_id="${crmTask.id}", hours=X, minutes=Y, note="وصف بلغة العميل"`,
+    `\`\`\``,
     ``,
-    `5. **بعد كل خطوة رئيسية — سجّل الوقت واكتب ملاحظة للعميل:**`,
-    `   استخدم أداة \`log_time\` → task_id="${crmTask.id}", hours=X, minutes=Y`,
-    `   note = "وصف بسيط يفهمه العميل — لا مصطلحات تقنية"`,
-    `   مثال جيد:  "تم مراجعة المتطلبات وتصميم هيكل قاعدة البيانات"`,
-    `   مثال سيئ: "refactored TaskController.php, fixed null pointer at line 287"`,
+    `**قواعد الـ note:**`,
+    `✅ جيد:  "تم مراجعة المتطلبات وإعداد هيكل قاعدة البيانات"`,
+    `✅ جيد:  "تم تصميم شاشة تسجيل الدخول وربطها بالـ API"`,
+    `❌ سيئ: "fixed null pointer at TaskController.php:287, refactored DB query"`,
+    `❌ سيئ: "ran git diff, updated index.js"`,
     ``,
-    `6. **عند الانتهاء — غيّر الحالة إلى Complete:**`,
-    `   استخدم أداة \`update_task_status\` → task_id="${crmTask.id}", status=5`,
-    `   ثم سجّل الوقت الإجمالي مع ملخص ما تم.`,
+    `اكتب دائماً من منظور العميل — ماذا أنجزنا له، وليس كيف أنجزناه تقنياً.`,
     ``,
-    `7. **أبلغ النظام بالانتهاء:**`,
-    `   curl -s -X POST http://localhost:${orchestratorPort}/api/tasks/${boardTaskId}/notify \\`,
-    `     -H 'Content-Type: application/json' \\`,
-    `     -d '{"output":"ملخص ما أنجزته"}'`,
+    `### الخطوة 5 — أغلق المهمة`,
+    `\`\`\``,
+    `update_task_status → task_id="${crmTask.id}", status=5`,
+    `log_time → task_id="${crmTask.id}", hours=X, minutes=Y, note="ملخص كل ما تم إنجازه"`,
+    `\`\`\``,
+    ``,
+    `### الخطوة 6 — أبلغ النظام بالانتهاء (مهم جداً)`,
+    `\`\`\`bash`,
+    `curl -s -X POST http://localhost:${port}/api/tasks/${boardTask.id}/notify \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -d '{"output":"ملخص ما أنجزته للعميل"}'`,
+    `\`\`\``,
     ``,
     `اختم ردك النهائي بـ: TASK_COMPLETED`,
   ].join('\n')
 }
 
 /**
- * Build the prompt sent when a client adds a new comment on a CRM task.
+ * Build prompt for a new client comment on an agent task.
  */
-function buildCommentPrompt(crmTask, comment, boardTaskId, orchestratorPort) {
+function buildCommentPrompt(crmTask, comment, boardTask, port) {
   return [
-    `# تعليق جديد من العميل على مهمتك`,
+    `# تعليق جديد من العميل — استأنف العمل`,
     ``,
     `## المهمة`,
-    `- **الاسم:** ${crmTask.name || crmTask.title || `Task #${crmTask.id}`}`,
+    `- **العنوان:** ${crmTask.name || crmTask.title || `Task #${crmTask.id}`}`,
     `- **CRM Task ID:** ${crmTask.id}`,
     ``,
     `## التعليق الجديد`,
-    `**من:** ${comment.staff_full_name || comment.staffid || 'العميل'}`,
+    `**من:** ${comment.staff_full_name || 'العميل'}`,
     `**التاريخ:** ${comment.dateadded || 'الآن'}`,
     ``,
-    `${comment.content || '(بدون محتوى)'}`,
+    `---`,
+    `${comment.content || ''}`,
+    `---`,
     ``,
     `## المطلوب`,
-    ``,
-    `1. اقرأ التعليق واستوعبه جيداً.`,
+    `1. اقرأ التعليق جيداً.`,
     `2. غيّر الحالة إلى In Progress:`,
     `   \`update_task_status\` → task_id="${crmTask.id}", status=2`,
-    `3. نفّذ ما طلبه العميل.`,
-    `4. سجّل الوقت مع ملاحظة بلغة العميل:`,
+    `3. نفّذ طلب العميل.`,
+    `4. سجّل الوقت بلغة العميل:`,
     `   \`log_time\` → task_id="${crmTask.id}", hours=X, minutes=Y, note="ما تم تنفيذه"`,
-    `5. أبلغ النظام بالانتهاء:`,
-    `   curl -s -X POST http://localhost:${orchestratorPort}/api/tasks/${boardTaskId}/notify \\`,
-    `     -H 'Content-Type: application/json' \\`,
-    `     -d '{"output":"ما أنجزته بناءً على تعليق العميل"}'`,
+    `5. إذا اكتمل الطلب — أغلق المهمة:`,
+    `   \`update_task_status\` → task_id="${crmTask.id}", status=5`,
+    `6. أبلغ النظام:`,
+    `\`\`\`bash`,
+    `curl -s -X POST http://localhost:${port}/api/tasks/${boardTask.id}/notify \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -d '{"output":"ما أنجزته بناءً على تعليق العميل"}'`,
+    `\`\`\``,
     ``,
     `اختم ردك النهائي بـ: TASK_COMPLETED`,
   ].join('\n')
@@ -174,7 +227,7 @@ function buildCommentPrompt(crmTask, comment, boardTaskId, orchestratorPort) {
 
 router.post('/', async (req, res) => {
   const { event, task_id, task: crmTask, comment } = req.body
-  const orchestratorPort = parseInt(process.env.BACKEND_PORT || '3001', 10)
+  const port = parseInt(process.env.BACKEND_PORT || '3001', 10)
 
   if (!event || !task_id || !crmTask) {
     return res.status(400).json({ error: 'event, task_id, and task are required' })
@@ -184,24 +237,20 @@ router.post('/', async (req, res) => {
 
   // ── task_assigned ─────────────────────────────────────────────────────────
   if (event === 'task_assigned') {
+    // Find or create board task
     let boardTask = findBoardTaskByCrmId(task_id)
-
     if (!boardTask) {
       const title = crmTask.name || crmTask.title || `CRM Task #${task_id}`
-      const description = [
-        crmTask.description || '',
-        `\n---\nCRM Task ID: ${task_id}`,
-      ].join('\n').trim()
-
-      boardTask = orchestrator.createTask({
+      boardTask   = orchestrator.createTask({
         title,
-        description,
+        description: (crmTask.description || '') + `\n\nCRM Task ID: ${task_id}`,
         priority: crmTask.priority == 1 ? 'low' : crmTask.priority == 3 ? 'high' : 'medium',
         context: { crm_task_id: task_id, source: 'crm_webhook' },
       })
       console.log(`[crm-webhook] board task created: ${boardTask.id}`)
     }
 
+    // Find idle agent
     const idleAgents = agentQueries.getAll.all().filter((a) => a.status === 'idle')
     if (idleAgents.length === 0) {
       console.warn('[crm-webhook] no idle agents — task queued')
@@ -211,31 +260,27 @@ router.post('/', async (req, res) => {
     const agent = idleAgents[0]
     await orchestrator.assignTaskToAgent(boardTask.id, agent.id)
 
-    const prompt = buildAssignedPrompt(crmTask, boardTask.id, orchestratorPort)
-    spawnAgent(agent, boardTask.id, prompt, orchestratorPort, `بدأ العمل على CRM task #${task_id}`)
+    const prompt = buildAssignedPrompt(crmTask, boardTask, port)
+    spawnAgent(agent, boardTask, prompt, port)
 
     return res.json({ ok: true, status: 'assigned', board_task_id: boardTask.id, agent: agent.name })
   }
 
   // ── comment_added ─────────────────────────────────────────────────────────
   if (event === 'comment_added') {
-    if (!comment) {
-      return res.status(400).json({ error: 'comment required for comment_added' })
-    }
+    if (!comment) return res.status(400).json({ error: 'comment required' })
 
     const boardTask = findBoardTaskByCrmId(task_id)
     if (!boardTask) {
-      console.warn(`[crm-webhook] no board task for CRM task ${task_id}`)
       return res.json({ ok: true, status: 'ignored', message: 'No board task for this CRM task' })
     }
 
-    const agentId = boardTask.assigned_agent
-    const agent   = agentId ? agentQueries.getById.get(agentId) : null
+    const agent = boardTask.assigned_agent ? agentQueries.getById.get(boardTask.assigned_agent) : null
     if (!agent) {
       return res.json({ ok: true, status: 'ignored', message: 'No agent assigned' })
     }
 
-    // Log the comment on the board task timeline
+    // Log comment in board timeline
     const lastStep = logQueries.getLastStep.get(boardTask.id)?.last_step ?? 0
     logQueries.insert.run({
       task_id:   boardTask.id,
@@ -244,20 +289,15 @@ router.post('/', async (req, res) => {
       message:   `[CRM Comment] ${comment.staff_full_name || 'Client'}: ${(comment.content || '').slice(0, 300)}`,
       timestamp: Date.now(),
     })
-    req.app.locals.broadcast?.({
-      event: 'task:log',
-      data: { taskId: boardTask.id, entry: {
-        step: lastStep + 1,
-        message: `[CRM Comment] ${(comment.content || '').slice(0, 100)}`,
-        timestamp: Date.now(),
-      }},
-    })
+    req.app.locals.broadcast?.({ event: 'task:log', data: {
+      taskId: boardTask.id,
+      entry: { step: lastStep + 1, message: `[CRM Comment] ${(comment.content || '').slice(0, 100)}`, timestamp: Date.now() },
+    }})
 
-    // Move board task back to in_progress
     orchestrator.updateTask(boardTask.id, { status: 'in_progress' })
 
-    const prompt = buildCommentPrompt(crmTask, comment, boardTask.id, orchestratorPort)
-    spawnAgent(agent, boardTask.id, prompt, orchestratorPort, `استقبل تعليق جديد على CRM task #${task_id}`)
+    const prompt = buildCommentPrompt(crmTask, comment, boardTask, port)
+    spawnAgent(agent, boardTask, prompt, port)
 
     return res.json({ ok: true, status: 'notified', board_task_id: boardTask.id, agent: agent.name })
   }
