@@ -87,6 +87,7 @@ app.use('/api/heartbeat', require('./routes/heartbeat'))
 app.use('/api/settings', require('./routes/settings'))
 app.use('/api/statuses', require('./routes/statuses'))
 app.use('/api/queue', require('./routes/queue'))
+app.use('/api/crm-webhook', require('./routes/crm-webhook'))
 
 // GET /api/events — recent event log
 app.get('/api/events', (req, res) => {
